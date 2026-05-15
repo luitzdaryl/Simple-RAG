@@ -66,8 +66,13 @@ Meaning of each part:
 
 # Let's code it anyway:
 
-- We will use a simple Python implement of RAG
-- We will use Ollama to run the models locally
+1- We will use a simple Python implement of RAG
+2- We will use Ollama to run the models locally
+3- The models:
+     - Embedding model: hf.co/CompendiumLabs/bge-base-en-v1.5-gguf
+     - Language model: hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF
+4- For the dataset, we will use a simple list of facts about cat. Each fact will be considered as a chunk in the indexing phrase
+
 
 	​
 
