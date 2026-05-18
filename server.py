@@ -1,88 +1,186 @@
 import ollama
 
-# LOAD THE DATASET
+# ============================================================
+# CONFIG
+# ============================================================
 
-dataset = []
-
-with open('./dataset/cat-facts.txt', 'r', encoding='utf-8') as file:
-  dataset = file.readlines()
-  
-  print(f'Loaded {len(dataset)} entries')
-  
-# ----------------------------------------------------------------------------  
-
-# IMPLEMENT THE VECTOR DATABASE
-
-EMBEDDING_MODEL = 'hf.co/CompendiumLabs/bge-base-en-v1.5-gguf'
+EMBEDDING_MODEL = 'hf.co/CompendiumLabs/bge-base-en-v1.5-gguf:latest'
 LANGUAGE_MODEL = 'ministral-3:3b'
-# LANGUAGE_MODEL = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'
 
-# Each element in the VECTOR_DB will be a tuple (chunk, embedding)
-# The embedding is a list of floats, for example: [0.1, 0.04, -0.34, 0.21, ...]
+DATASET_PATH = './dataset/cat-facts.txt'
+
+TOP_K = 3
+SIMILARITY_THRESHOLD = 0.45
+
+
+# ============================================================
+# LOAD DATASET
+# ============================================================
+
+print('Loading dataset...')
+
+with open(DATASET_PATH, 'r', encoding='utf-8') as file:
+    dataset = [line.strip() for line in file.readlines() if line.strip()]
+
+print(f'Loaded {len(dataset)} entries')
+
+
+# ============================================================
+# VECTOR DATABASE
+# ============================================================
+
+# Each item:
+# {
+#     "text": "...",
+#     "embedding": [...]
+# }
 
 VECTOR_DB = []
 
+
+def generate_embedding(text):
+    response = ollama.embed(
+        model=EMBEDDING_MODEL,
+        input=text
+    )
+
+    return response['embeddings'][0]
+
+
 def add_chunk_to_database(chunk):
-  embedding = ollama.embed(model=EMBEDDING_MODEL, input=chunk)['embeddings'][0]
-  VECTOR_DB.append((chunk, embedding))
+    embedding = generate_embedding(chunk)
 
-# ---------------------------------------------------------------------------- 
+    VECTOR_DB.append({
+        'text': chunk,
+        'embedding': embedding
+    })
 
-# IMPLEMENT THE RETRIEVAL FUNCTION
+
+print('\nBuilding vector database...')
+
+for chunk in dataset:
+    add_chunk_to_database(chunk)
+
+print(f'Vector DB contains {len(VECTOR_DB)} entries')
+
+
+# ============================================================
+# SIMILARITY SEARCH
+# ============================================================
 
 def cosine_similarity(a, b):
-  dot_product = sum([x * y for x, y in zip(a, b)])
-  norm_a = sum([x ** 2 for x in a]) ** 0.5
-  norm_b = sum([x ** 2 for x in b]) ** 0.5
-  return dot_product / (norm_a * norm_b)
+    dot_product = sum(x * y for x, y in zip(a, b))
 
-def retrieve(query, top_n=3):
-  query_embedding = ollama.embed(model=EMBEDDING_MODEL, input=query)['embeddings'][0]
-  
-  # temporary list to store (chunk, similarity) pairs
-  similarities = []
-  for chunk, embedding in VECTOR_DB:
-    similarity = cosine_similarity(query_embedding, embedding)
-    similarities.append((chunk, similarity))
-    
-  # sort by similarity in descending order, because higher similarity means more relevant chunks
-  similarities.sort(key=lambda x: x[1], reverse=True)
-  
-  # finally, return the top N most relevant chunks
-  return similarities[:top_n]
+    norm_a = sum(x ** 2 for x in a) ** 0.5
+    norm_b = sum(x ** 2 for x in b) ** 0.5
 
-# ---------------------------------------------------------------------------- 
+    if norm_a == 0 or norm_b == 0:
+        return 0
+
+    return dot_product / (norm_a * norm_b)
 
 
-# IMPLEMENT THE GENERATION PHASE
+def retrieve(query, top_k=TOP_K):
+    query_embedding = generate_embedding(query)
 
-input_query = input('Ask me a question: ')
-retrieved_knowledge = retrieve(input_query)
+    similarities = []
 
-print('Retrieved knowledge:')
-for chunk, similarity in retrieved_knowledge:
-  print(f' - (similarity: {similarity:.2f}) {chunk}')
+    for item in VECTOR_DB:
+        similarity = cosine_similarity(
+            query_embedding,
+            item['embedding']
+        )
 
-instruction_prompt = f'''You are a helpful chatbot.
-Use only the following pieces of context to answer the question. Don't make up any new information:
-{'\n'.join([f' - {chunk}' for chunk, similarity in retrieved_knowledge])}
-'''
+        if similarity >= SIMILARITY_THRESHOLD:
+            similarities.append({
+                'text': item['text'],
+                'similarity': similarity
+            })
 
-# ---------------------------------------------------------------------------- 
+    similarities.sort(
+        key=lambda x: x['similarity'],
+        reverse=True
+    )
+
+    return similarities[:top_k]
 
 
-stream = ollama.chat(
-  model=LANGUAGE_MODEL,
-  messages=[
-    {'role': 'system', 'content': instruction_prompt},
-    {'role': 'user', 'content': input_query},
-  ],
-  stream=True,
-)
+# ============================================================
+# CHAT LOOP
+# ============================================================
 
-# print the response from the chatbot in real-time
-print('Chatbot response:')
-for chunk in stream:
-  print(chunk['message']['content'], end='', flush=True)
+print('\nRAG chatbot is ready!')
+print('Type "exit" to quit.\n')
 
-# ---------------------------------------------------------------------------- 
+while True:
+
+    user_query = input('Enter your message: ')
+
+    if user_query.lower() == 'exit':
+        break
+
+    # --------------------------------------------------------
+    # RETRIEVE RELEVANT KNOWLEDGE
+    # --------------------------------------------------------
+
+    retrieved_knowledge = retrieve(user_query)
+
+    print('\nRetrieved knowledge:')
+
+    if not retrieved_knowledge:
+        print('No relevant knowledge found.')
+
+    for item in retrieved_knowledge:
+        print(f"[{item['similarity']:.4f}] {item['text']}")
+
+    # --------------------------------------------------------
+    # BUILD CONTEXT
+    # --------------------------------------------------------
+
+    context = '\n'.join([
+        f"- {item['text']}"
+        for item in retrieved_knowledge
+    ])
+
+    # --------------------------------------------------------
+    # SYSTEM PROMPT
+    # --------------------------------------------------------
+
+    system_prompt = f"""
+You are a helpful AI assistant.
+
+Answer the user's question using ONLY the retrieved context below.
+
+If the answer cannot be found in the context, say:
+"I could not find the answer in the provided knowledge base."
+
+Retrieved Context:
+{context}
+"""
+
+    # --------------------------------------------------------
+    # GENERATE RESPONSE
+    # --------------------------------------------------------
+
+    stream = ollama.chat(
+        model=LANGUAGE_MODEL,
+        messages=[
+            {
+                'role': 'system',
+                'content': system_prompt
+            },
+            {
+                'role': 'user',
+                'content': user_query
+            }
+        ],
+        stream=True
+    )
+
+    print('\nAssistant: ', end='')
+
+    for chunk in stream:
+        content = chunk['message']['content']
+        print(content, end='', flush=True)
+
+    print('\n')
